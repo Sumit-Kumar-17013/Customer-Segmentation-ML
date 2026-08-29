@@ -1,514 +1,807 @@
-/* =========================================================
-   CONFIGURATION
-   ---------------------------------------------------------
-   Replace this with your deployed FastAPI base URL (no
-   trailing slash), e.g. "https://customer-segmentation-api.onrender.com"
-   ========================================================= */
-const API_BASE_URL = "https://customer-segmentation-ml-68m5.onrender.com";
+/**
+ * ==============================================================================
+ * CustomerIQ - Machine Learning Customer Segmentation Frontend Controller
+ * Model: Preprocessing -> log1p(total_spend) -> StandardScaler -> PCA -> K-Means
+ * Backend: FastAPI (Deployed on Render / Localhost)
+ * ==============================================================================
+ */
 
-const ENDPOINTS = {
-  predict: "/Prediction",
-  health: "/Health",
+// ==============================================================================
+// 1. FASTAPI BACKEND CONFIGURATION
+// ==============================================================================
+/**
+ * REPLACE "YOUR_RENDER_FASTAPI_URL" with your live Render backend URL,
+ * for example: "https://customer-segmentation-api.onrender.com"
+ * 
+ * Note: If you leave this as "YOUR_RENDER_FASTAPI_URL" or test locally,
+ * you can also click the API STATUS badge in the top bar to test/change
+ * your URL in real-time without re-deploying!
+ */
+const API_BASE_URL = "https://mental-heath-score-in-ml-1.onrender.com";
+
+// Local storage key for runtime URL override (useful during testing)
+const STORAGE_KEY_API_URL = "customeriq_api_base_url";
+
+// Get active API URL (checks localStorage first, then falls back to API_BASE_URL or window.location)
+function getActiveApiUrl() {
+  const savedUrl = localStorage.getItem(STORAGE_KEY_API_URL);
+  if (savedUrl && savedUrl.trim() !== "") {
+    return savedUrl.trim().replace(/\/+$/, "");
+  }
+  if (API_BASE_URL && API_BASE_URL !== "YOUR_RENDER_FASTAPI_URL") {
+    return API_BASE_URL.replace(/\/+$/, "");
+  }
+  // Default fallback for local testing
+  return "http://localhost:8000";
+}
+
+// Global state
+const appState = {
+  isPredicting: false,
+  apiStatus: "checking", // 'online' | 'offline' | 'checking'
+  lastLatencyMs: null,
+  lastPrediction: null
 };
 
-/* =========================================================
-   NOTE ON ENCODED FIELDS
-   ---------------------------------------------------------
-   Living_With_Encoded is documented directly in the FastAPI
-   schema: 0 = Alone, 1 = Partner. The <select> option values
-   below already use those encoded numbers.
+// ==============================================================================
+// 2. DOM ELEMENTS
+// ==============================================================================
+const DOM = {
+  // Form Elements
+  form: document.getElementById("customer-segmentation-form"),
+  btnPredict: document.getElementById("btn-predict"),
+  btnReset: document.getElementById("btn-reset"),
+  
+  // Fields (Exact match to FastAPI ModelData)
+  fieldAge: document.getElementById("field-age"),
+  fieldIncome: document.getElementById("field-income"),
+  fieldEducation: document.getElementById("field-education"),
+  fieldLivingWith: document.getElementById("field-living-with"),
+  fieldChildren: document.getElementById("field-children"),
+  fieldFamilySize: document.getElementById("field-family-size"),
+  fieldRecency: document.getElementById("field-recency"),
+  fieldTenure: document.getElementById("field-tenure"),
+  fieldWebVisits: document.getElementById("field-web-visits"),
+  fieldSpend: document.getElementById("field-spend"),
+  fieldPurchases: document.getElementById("field-purchases"),
+  fieldCampaigns: document.getElementById("field-campaigns"),
 
-   Education_Encoded is NOT documented in the FastAPI schema
-   or the saved pipeline — the pipeline only knows it as a
-   passthrough numeric column. The mapping below assumes the
-   common 5-level ordinal encoding used in the public
-   "Customer Personality Analysis" dataset this project style
-   is based on (2n Cycle=0, Basic=1, Graduation=2, Master=3,
-   PhD=4). If your training notebook used a different mapping,
-   update the option values in index.html to match — this is
-   the one field this frontend cannot verify from the files
-   provided.
-   ========================================================= */
+  // Result Section
+  placeholderCard: document.getElementById("result-placeholder-card"),
+  resultCard: document.getElementById("prediction-result-card"),
+  clusterBadge: document.getElementById("result-cluster-badge"),
+  segmentHeading: document.getElementById("result-segment-name"),
+  insightText: document.getElementById("result-insight-text"),
+  recommendationBullets: document.getElementById("result-action-bullets"),
+  resultTimestamp: document.getElementById("result-timestamp"),
+  snapshotSpend: document.getElementById("snapshot-spend"),
+  snapshotIncome: document.getElementById("snapshot-income"),
+  snapshotPurchases: document.getElementById("snapshot-purchases"),
+  rawPayloadBtn: document.getElementById("raw-payload-btn"),
+  rawPayloadView: document.getElementById("raw-payload-view"),
 
-/* =========================================================
-   STATE
-   ========================================================= */
-const els = {};
-let healthPollTimer = null;
+  // API Status & Modal
+  apiStatusBadge: document.getElementById("api-status-badge"),
+  statusDot: document.getElementById("status-dot"),
+  statusText: document.getElementById("status-text"),
+  configModal: document.getElementById("api-config-modal"),
+  modalCloseBtn: document.getElementById("modal-close-btn"),
+  apiUrlInput: document.getElementById("api-url-input"),
+  btnSaveApiUrl: document.getElementById("btn-save-api-url"),
+  btnPingHealth: document.getElementById("btn-ping-health"),
+  healthTestResult: document.getElementById("health-test-result"),
 
-/* =========================================================
-   INIT
-   ========================================================= */
+  // Presets
+  presetHighValue: document.getElementById("preset-high-value"),
+  presetBrowsing: document.getElementById("preset-browsing"),
+  presetBalanced: document.getElementById("preset-balanced"),
+
+  // Mobile menu
+  mobileMenuBtn: document.getElementById("mobile-menu-btn"),
+  mobileNavDrawer: document.getElementById("mobile-nav-drawer"),
+
+  // Toast Container
+  toastContainer: document.getElementById("toast-container")
+};
+
+// ==============================================================================
+// 3. INITIALIZATION & EVENT LISTENERS
+// ==============================================================================
 document.addEventListener("DOMContentLoaded", () => {
-  cacheEls();
-  initNav();
-  initClusterCanvas();
-  initPipelineScrollSpy();
-  initForm();
-  checkApiHealth();
-  healthPollTimer = setInterval(checkApiHealth, 30000);
+  initApiStatus();
+  initFormEventListeners();
+  initPresets();
+  initModalListeners();
+  initMobileMenu();
+  renderHeroClusterNodes();
+
+  // Load initial preset (High-Value Archetype) as default sample values
+  loadPresetData("high-value");
 });
 
-function cacheEls() {
-  els.nav = document.getElementById("siteNav");
-  els.navBurger = document.getElementById("navBurger");
-  els.mobileMenu = document.getElementById("mobileMenu");
-  els.apiStatusDot = document.getElementById("apiStatusDot");
-  els.apiStatusLabel = document.getElementById("apiStatusLabel");
-  els.toastStack = document.getElementById("toastStack");
+// ==============================================================================
+// 4. API HEALTH MONITORING & CONFIGURATION
+// ==============================================================================
+async function checkApiHealth(customUrl = null) {
+  const targetUrl = customUrl || getActiveApiUrl();
+  updateStatusUI("checking", "Pinging API...");
 
-  els.form = document.getElementById("predictForm");
-  els.predictBtn = document.getElementById("predictBtn");
-  els.resetBtn = document.getElementById("resetBtn");
-  els.formNote = document.getElementById("formNote");
+  const startTime = performance.now();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 6000); // 6s timeout
 
-  els.resultPlaceholder = document.getElementById("resultPlaceholder");
-  els.resultScanning = document.getElementById("resultScanning");
-  els.resultCard = document.getElementById("resultCard");
-  els.resultError = document.getElementById("resultError");
-  els.resultErrorMessage = document.getElementById("resultErrorMessage");
-  els.resultCluster = document.getElementById("resultCluster");
-  els.resultSegment = document.getElementById("resultSegment");
-  els.resultMessage = document.getElementById("resultMessage");
-  els.analyzeAnotherBtn = document.getElementById("analyzeAnotherBtn");
-
-  els.pipelineNodes = Array.from(document.querySelectorAll(".pipeline-node"));
-}
-
-/* =========================================================
-   NAVIGATION (mobile menu + scroll shadow)
-   ========================================================= */
-function initNav() {
-  els.navBurger.addEventListener("click", () => {
-    const isOpen = els.mobileMenu.classList.toggle("is-open");
-    els.navBurger.setAttribute("aria-expanded", String(isOpen));
-  });
-
-  els.mobileMenu.querySelectorAll("a").forEach((link) => {
-    link.addEventListener("click", () => {
-      els.mobileMenu.classList.remove("is-open");
-      els.navBurger.setAttribute("aria-expanded", "false");
-    });
-  });
-}
-
-/* =========================================================
-   HERO CANVAS — animated K-Means style cluster formation
-   ========================================================= */
-function initClusterCanvas() {
-  const canvas = document.getElementById("clusterCanvas");
-  if (!canvas) return;
-  const ctx = canvas.getContext("2d");
-  const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-  let width, height, dpr;
-  const POINT_COUNT = 70;
-  let points = [];
-  let centroids = [];
-  let phase = 0; // 0 = scattered, 1 = converging, 2 = held
-  let phaseTimer = 0;
-
-  function resize() {
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
-    width = canvas.clientWidth = canvas.parentElement.offsetWidth;
-    height = canvas.clientHeight = canvas.parentElement.offsetHeight;
-    canvas.width = width * dpr;
-    canvas.height = height * dpr;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    setup();
-  }
-
-  function setup() {
-    centroids = [
-      { x: width * 0.32, y: height * 0.42, color: "56, 189, 248" },
-      { x: width * 0.7, y: height * 0.6, color: "251, 191, 36" },
-    ];
-    points = Array.from({ length: POINT_COUNT }, () => ({
-      x: Math.random() * width,
-      y: Math.random() * height,
-      scatterX: Math.random() * width,
-      scatterY: Math.random() * height,
-      cluster: Math.random() < 0.5 ? 0 : 1,
-      r: 1.6 + Math.random() * 1.8,
-    }));
-  }
-
-  function targetFor(p) {
-    const c = centroids[p.cluster];
-    const angle = (p.x + p.y) * 0.01;
-    const spread = 70;
-    return {
-      x: c.x + Math.cos(angle + p.cluster * 3) * spread * Math.random(),
-      y: c.y + Math.sin(angle) * spread * Math.random(),
-    };
-  }
-
-  function draw() {
-    ctx.clearRect(0, 0, width, height);
-
-    // connecting lines (subtle)
-    ctx.lineWidth = 1;
-    for (let i = 0; i < points.length; i++) {
-      for (let j = i + 1; j < points.length; j++) {
-        const a = points[i], b = points[j];
-        if (a.cluster !== b.cluster) continue;
-        const dx = a.x - b.x, dy = a.y - b.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < 60) {
-          ctx.strokeStyle = `rgba(${centroids[a.cluster].color}, ${0.12 * (1 - dist / 60)})`;
-          ctx.beginPath();
-          ctx.moveTo(a.x, a.y);
-          ctx.lineTo(b.x, b.y);
-          ctx.stroke();
-        }
-      }
-    }
-
-    // points
-    points.forEach((p) => {
-      ctx.beginPath();
-      ctx.fillStyle = `rgba(${centroids[p.cluster].color}, 0.85)`;
-      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-      ctx.fill();
-    });
-
-    // centroids (visible once converged)
-    if (phase >= 1) {
-      centroids.forEach((c) => {
-        ctx.beginPath();
-        ctx.strokeStyle = `rgba(${c.color}, 0.5)`;
-        ctx.lineWidth = 1.5;
-        ctx.arc(c.x, c.y, 84, 0, Math.PI * 2);
-        ctx.stroke();
-      });
-    }
-  }
-
-  function step() {
-    phaseTimer++;
-
-    if (phase === 0 && phaseTimer > 60) {
-      phase = 1;
-      phaseTimer = 0;
-      points.forEach((p) => { p.target = targetFor(p); });
-    } else if (phase === 1 && phaseTimer > 140) {
-      phase = 2;
-      phaseTimer = 0;
-    } else if (phase === 2 && phaseTimer > 220) {
-      phase = 0;
-      phaseTimer = 0;
-      points.forEach((p) => {
-        p.target = { x: p.scatterX, y: p.scatterY };
-      });
-    }
-
-    const ease = phase === 0 && phaseTimer === 0 ? 1 : 0.035;
-    points.forEach((p) => {
-      const t = p.target || { x: p.scatterX, y: p.scatterY };
-      p.x += (t.x - p.x) * ease;
-      p.y += (t.y - p.y) * ease;
-    });
-
-    draw();
-    if (!prefersReducedMotion) requestAnimationFrame(step);
-  }
-
-  window.addEventListener("resize", debounce(resize, 200));
-  resize();
-  draw();
-  if (!prefersReducedMotion) requestAnimationFrame(step);
-}
-
-/* =========================================================
-   PIPELINE — highlight nodes as they scroll into view
-   ========================================================= */
-function initPipelineScrollSpy() {
-  if (!("IntersectionObserver" in window) || els.pipelineNodes.length === 0) return;
-  const observer = new IntersectionObserver(
-    (entries) => {
-      entries.forEach((entry) => {
-        if (entry.isIntersecting) {
-          const idx = Number(entry.target.dataset.node);
-          setTimeout(() => entry.target.classList.add("is-active"), idx * 90);
-        }
-      });
-    },
-    { threshold: 0.5 }
-  );
-  els.pipelineNodes.forEach((node) => observer.observe(node));
-}
-
-/* =========================================================
-   API HEALTH CHECK
-   ========================================================= */
-async function checkApiHealth() {
-  if (!API_BASE_URL || API_BASE_URL.includes("YOUR_RENDER_FASTAPI_URL")) {
-    setApiStatus("offline", "API URL not set");
-    return;
-  }
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    const res = await fetch(`${API_BASE_URL}${ENDPOINTS.health}`, {
+    const response = await fetch(`${targetUrl}/Health`, {
       method: "GET",
       signal: controller.signal,
+      headers: { "Accept": "application/json" }
     });
-    clearTimeout(timeout);
-    if (res.ok) {
-      setApiStatus("online", "API online");
+
+    clearTimeout(timeoutId);
+    const latency = Math.round(performance.now() - startTime);
+    appState.lastLatencyMs = latency;
+
+    if (response.ok) {
+      const data = await response.json();
+      appState.apiStatus = "online";
+      updateStatusUI("online", `API Online (${latency}ms)`);
+      return { ok: true, data, latency };
     } else {
-      setApiStatus("offline", "API offline");
+      appState.apiStatus = "offline";
+      updateStatusUI("offline", `API Error (${response.status})`);
+      return { ok: false, status: response.status };
     }
   } catch (err) {
-    console.error("Health check failed:", err);
-    setApiStatus("offline", "API offline");
+    clearTimeout(timeoutId);
+    appState.apiStatus = "offline";
+    const errorMsg = err.name === "AbortError" ? "Timeout" : "Offline";
+    updateStatusUI("offline", `API ${errorMsg}`);
+    return { ok: false, error: err.message };
   }
 }
 
-function setApiStatus(state, label) {
-  els.apiStatusDot.classList.remove("is-online", "is-offline");
-  els.apiStatusDot.classList.add(state === "online" ? "is-online" : "is-offline");
-  els.apiStatusLabel.textContent = label;
+function updateStatusUI(status, text) {
+  if (!DOM.statusDot || !DOM.statusText) return;
+  
+  DOM.statusDot.className = `status-dot ${status}`;
+  DOM.statusText.textContent = text;
 }
 
-/* =========================================================
-   FORM — validation, submit, reset
-   ========================================================= */
-const FIELD_IDS = [
-  "Age", "Income", "Recency", "Customer_Tenure_Days", "total_spend",
-  "total_purchase", "total_campaigns", "children", "family_size",
-  "Education_Encoded", "Living_With_Encoded", "NumWebVisitsMonth",
-];
-
-function initForm() {
-  els.form.addEventListener("submit", handleSubmit);
-  els.resetBtn.addEventListener("click", handleReset);
-  els.analyzeAnotherBtn.addEventListener("click", handleReset);
-
-  FIELD_IDS.forEach((id) => {
-    const input = document.getElementById(id);
-    input.addEventListener("input", () => clearFieldError(id));
-  });
+function initApiStatus() {
+  if (DOM.apiStatusBadge) {
+    DOM.apiStatusBadge.addEventListener("click", () => {
+      openConfigModal();
+    });
+  }
+  // Check health on initial boot
+  checkApiHealth();
 }
 
-function validateForm() {
-  let firstInvalid = null;
-  const values = {};
+function openConfigModal() {
+  if (!DOM.configModal) return;
+  DOM.apiUrlInput.value = getActiveApiUrl();
+  DOM.healthTestResult.style.display = "none";
+  DOM.configModal.classList.add("active");
+}
 
-  FIELD_IDS.forEach((id) => {
-    const input = document.getElementById(id);
-    const raw = input.value;
-    const isSelect = input.tagName === "SELECT";
-    let valid = raw !== "" && raw !== null;
+function closeConfigModal() {
+  if (!DOM.configModal) return;
+  DOM.configModal.classList.remove("active");
+}
 
-    if (valid && !isSelect) {
-      const num = Number(raw);
-      valid = !Number.isNaN(num);
-      if (valid && input.min !== "" && num < Number(input.min)) valid = false;
-      if (valid && input.max !== "" && num > Number(input.max)) valid = false;
-      if (valid) values[id] = num;
-    } else if (valid && isSelect) {
-      values[id] = Number(raw);
-    }
+function initModalListeners() {
+  if (DOM.modalCloseBtn) {
+    DOM.modalCloseBtn.addEventListener("click", closeConfigModal);
+  }
+  if (DOM.configModal) {
+    DOM.configModal.addEventListener("click", (e) => {
+      if (e.target === DOM.configModal) closeConfigModal();
+    });
+  }
 
-    if (!valid) {
-      setFieldError(id, "Please enter a valid value.");
-      if (!firstInvalid) firstInvalid = input;
-    } else {
-      clearFieldError(id);
-    }
+  if (DOM.btnSaveApiUrl) {
+    DOM.btnSaveApiUrl.addEventListener("click", () => {
+      const newUrl = DOM.apiUrlInput.value.trim().replace(/\/+$/, "");
+      if (newUrl) {
+        localStorage.setItem(STORAGE_KEY_API_URL, newUrl);
+        showToast("API Endpoint Updated", `Now connecting to: ${newUrl}`, "success");
+        checkApiHealth(newUrl);
+        closeConfigModal();
+      }
+    });
+  }
+
+  if (DOM.btnPingHealth) {
+    DOM.btnPingHealth.addEventListener("click", async () => {
+      const urlToTest = DOM.apiUrlInput.value.trim().replace(/\/+$/, "");
+      DOM.btnPingHealth.disabled = true;
+      DOM.btnPingHealth.textContent = "Testing...";
+
+      const result = await checkApiHealth(urlToTest);
+      DOM.btnPingHealth.disabled = false;
+      DOM.btnPingHealth.textContent = "Test /Health Endpoint";
+
+      DOM.healthTestResult.style.display = "block";
+      if (result.ok) {
+        DOM.healthTestResult.innerHTML = `
+          <div style="color: var(--accent-emerald); font-weight: 600; margin-bottom: 4px;">✓ Health check passed (${result.latency}ms)</div>
+          <pre style="font-size: 0.72rem; color: #94a3b8; background: #060911; padding: 6px; border-radius: 4px;">${JSON.stringify(result.data, null, 2)}</pre>
+        `;
+      } else {
+        DOM.healthTestResult.innerHTML = `
+          <div style="color: var(--accent-rose); font-weight: 600; margin-bottom: 4px;">✗ Unable to reach FastAPI backend</div>
+          <p style="font-size: 0.75rem; color: #94a3b8;">Make sure your FastAPI server is running with CORS enabled. Free-tier Render instances may take ~30-50s to wake up from cold sleep.</p>
+        `;
+      }
+    });
+  }
+}
+
+// ==============================================================================
+// 5. PRESETS & SAMPLE DATA ARCHETYPES
+// ==============================================================================
+const PRESETS = {
+  "high-value": {
+    Age: 48,
+    Income: 92000,
+    Education_Encoded: 2, // Postgraduate / PhD
+    Living_With_Encoded: 1, // Partner
+    children: 0,
+    family_size: 2,
+    Recency: 14,
+    Customer_Tenure_Days: 520,
+    NumWebVisitsMonth: 2,
+    total_spend: 1480, // Original raw amount
+    total_purchase: 24,
+    total_campaigns: 3
+  },
+  "browsing": {
+    Age: 27,
+    Income: 26500,
+    Education_Encoded: 0, // Basic / Undergraduate
+    Living_With_Encoded: 0, // Alone
+    children: 1,
+    family_size: 2,
+    Recency: 68,
+    Customer_Tenure_Days: 110,
+    NumWebVisitsMonth: 9,
+    total_spend: 85, // Original raw amount
+    total_purchase: 3,
+    total_campaigns: 0
+  },
+  "balanced": {
+    Age: 41,
+    Income: 58000,
+    Education_Encoded: 1, // Graduate / Master
+    Living_With_Encoded: 1, // Partner
+    children: 2,
+    family_size: 4,
+    Recency: 32,
+    Customer_Tenure_Days: 390,
+    NumWebVisitsMonth: 4,
+    total_spend: 620, // Original raw amount
+    total_purchase: 15,
+    total_campaigns: 1
+  }
+};
+
+function loadPresetData(presetKey) {
+  const data = PRESETS[presetKey];
+  if (!data) return;
+
+  DOM.fieldAge.value = data.Age;
+  DOM.fieldIncome.value = data.Income;
+  DOM.fieldEducation.value = data.Education_Encoded;
+  DOM.fieldLivingWith.value = data.Living_With_Encoded;
+  DOM.fieldChildren.value = data.children;
+  DOM.fieldFamilySize.value = data.family_size;
+  DOM.fieldRecency.value = data.Recency;
+  DOM.fieldTenure.value = data.Customer_Tenure_Days;
+  DOM.fieldWebVisits.value = data.NumWebVisitsMonth;
+  DOM.fieldSpend.value = data.total_spend;
+  DOM.fieldPurchases.value = data.total_purchase;
+  DOM.fieldCampaigns.value = data.total_campaigns;
+
+  // Clear any existing input errors
+  clearInputErrors();
+
+  // Update preset active styles
+  [DOM.presetHighValue, DOM.presetBrowsing, DOM.presetBalanced].forEach(btn => {
+    if (btn) btn.classList.remove("active");
   });
 
-  if (firstInvalid) {
-    firstInvalid.focus();
+  if (presetKey === "high-value" && DOM.presetHighValue) DOM.presetHighValue.classList.add("active");
+  if (presetKey === "browsing" && DOM.presetBrowsing) DOM.presetBrowsing.classList.add("active");
+  if (presetKey === "balanced" && DOM.presetBalanced) DOM.presetBalanced.classList.add("active");
+}
+
+function initPresets() {
+  if (DOM.presetHighValue) {
+    DOM.presetHighValue.addEventListener("click", () => loadPresetData("high-value"));
+  }
+  if (DOM.presetBrowsing) {
+    DOM.presetBrowsing.addEventListener("click", () => loadPresetData("browsing"));
+  }
+  if (DOM.presetBalanced) {
+    DOM.presetBalanced.addEventListener("click", () => loadPresetData("balanced"));
+  }
+}
+
+// ==============================================================================
+// 6. FORM VALIDATION & PAYLOAD ASSEMBLY
+// ==============================================================================
+function clearInputErrors() {
+  const inputs = DOM.form.querySelectorAll(".form-input, .form-select");
+  inputs.forEach(input => input.classList.remove("input-error"));
+
+  const errorMsgs = DOM.form.querySelectorAll(".field-error-msg");
+  errorMsgs.forEach(msg => msg.classList.remove("visible"));
+}
+
+function showFieldError(inputElement, message) {
+  if (!inputElement) return;
+  inputElement.classList.add("input-error");
+  
+  const parent = inputElement.closest(".input-field-wrapper");
+  if (parent) {
+    const errorSpan = parent.querySelector(".field-error-msg");
+    if (errorSpan) {
+      errorSpan.textContent = message;
+      errorSpan.classList.add("visible");
+    }
+  }
+}
+
+function validateAndExtractFormData() {
+  clearInputErrors();
+  let hasError = false;
+
+  // 1. Age: float, ge=18, le=100
+  const ageVal = parseFloat(DOM.fieldAge.value);
+  if (isNaN(ageVal) || ageVal < 18 || ageVal > 100) {
+    showFieldError(DOM.fieldAge, "Age must be between 18 and 100 years.");
+    hasError = true;
+  }
+
+  // 2. Income: float, ge=0
+  const incomeVal = parseFloat(DOM.fieldIncome.value);
+  if (isNaN(incomeVal) || incomeVal < 0) {
+    showFieldError(DOM.fieldIncome, "Income must be greater than or equal to $0.");
+    hasError = true;
+  }
+
+  // 3. Education_Encoded: float, ge=0
+  const educationVal = parseFloat(DOM.fieldEducation.value);
+  if (isNaN(educationVal) || educationVal < 0) {
+    showFieldError(DOM.fieldEducation, "Please select an education level.");
+    hasError = true;
+  }
+
+  // 4. Living_With_Encoded: float, ge=0, le=1 (0=Alone, 1=Partner)
+  const livingVal = parseFloat(DOM.fieldLivingWith.value);
+  if (isNaN(livingVal) || (livingVal !== 0 && livingVal !== 1)) {
+    showFieldError(DOM.fieldLivingWith, "Please select a living arrangement.");
+    hasError = true;
+  }
+
+  // 5. children: float, ge=0
+  const childrenVal = parseFloat(DOM.fieldChildren.value);
+  if (isNaN(childrenVal) || childrenVal < 0) {
+    showFieldError(DOM.fieldChildren, "Children count must be 0 or greater.");
+    hasError = true;
+  }
+
+  // 6. family_size: float, ge=1
+  const familySizeVal = parseFloat(DOM.fieldFamilySize.value);
+  if (isNaN(familySizeVal) || familySizeVal < 1) {
+    showFieldError(DOM.fieldFamilySize, "Family size must be at least 1.");
+    hasError = true;
+  }
+
+  // 7. Recency: float, ge=0
+  const recencyVal = parseFloat(DOM.fieldRecency.value);
+  if (isNaN(recencyVal) || recencyVal < 0) {
+    showFieldError(DOM.fieldRecency, "Recency must be 0 or more days.");
+    hasError = true;
+  }
+
+  // 8. Customer_Tenure_Days: float, ge=0
+  const tenureVal = parseFloat(DOM.fieldTenure.value);
+  if (isNaN(tenureVal) || tenureVal < 0) {
+    showFieldError(DOM.fieldTenure, "Tenure must be 0 or more days.");
+    hasError = true;
+  }
+
+  // 9. NumWebVisitsMonth: float, ge=0
+  const webVisitsVal = parseFloat(DOM.fieldWebVisits.value);
+  if (isNaN(webVisitsVal) || webVisitsVal < 0) {
+    showFieldError(DOM.fieldWebVisits, "Web visits must be 0 or greater.");
+    hasError = true;
+  }
+
+  // 10. total_spend: float, ge=0 (CRITICAL: ORIGINAL value, do NOT apply log1p)
+  const spendVal = parseFloat(DOM.fieldSpend.value);
+  if (isNaN(spendVal) || spendVal < 0) {
+    showFieldError(DOM.fieldSpend, "Total spend must be $0 or greater.");
+    hasError = true;
+  }
+
+  // 11. total_purchase: float, ge=0
+  const purchasesVal = parseFloat(DOM.fieldPurchases.value);
+  if (isNaN(purchasesVal) || purchasesVal < 0) {
+    showFieldError(DOM.fieldPurchases, "Total purchases must be 0 or greater.");
+    hasError = true;
+  }
+
+  // 12. total_campaigns: float, ge=0
+  const campaignsVal = parseFloat(DOM.fieldCampaigns.value);
+  if (isNaN(campaignsVal) || campaignsVal < 0) {
+    showFieldError(DOM.fieldCampaigns, "Campaigns accepted must be 0 or greater.");
+    hasError = true;
+  }
+
+  if (hasError) {
+    showToast("Validation Error", "Please check the highlighted form fields.", "error");
     return null;
   }
-  return values;
+
+  // Exact payload matching FastAPI ModelData Pydantic Schema
+  return {
+    Age: ageVal,
+    Income: incomeVal,
+    Recency: recencyVal,
+    Customer_Tenure_Days: tenureVal,
+    total_spend: spendVal,
+    total_purchase: purchasesVal,
+    total_campaigns: campaignsVal,
+    children: childrenVal,
+    family_size: familySizeVal,
+    Education_Encoded: educationVal,
+    Living_With_Encoded: livingVal,
+    NumWebVisitsMonth: webVisitsVal
+  };
 }
 
-function setFieldError(id, message) {
-  const input = document.getElementById(id);
-  const field = input.closest(".field");
-  const errEl = document.getElementById(`err-${id}`);
-  field.classList.add("has-error");
-  if (errEl) errEl.textContent = message;
-  // restart shake animation
-  field.style.animation = "none";
-  requestAnimationFrame(() => { field.style.animation = ""; });
-}
+// ==============================================================================
+// 7. PREDICTION REQUEST & RESPONSE PROCESSING
+// ==============================================================================
+async function handlePredictSubmit(event) {
+  if (event) event.preventDefault();
+  if (appState.isPredicting) return;
 
-function clearFieldError(id) {
-  const input = document.getElementById(id);
-  const field = input.closest(".field");
-  const errEl = document.getElementById(`err-${id}`);
-  field.classList.remove("has-error");
-  if (errEl) errEl.textContent = "";
-}
+  const payload = validateAndExtractFormData();
+  if (!payload) return;
 
-async function handleSubmit(e) {
-  e.preventDefault();
-  els.formNote.textContent = "";
+  const apiUrl = getActiveApiUrl();
+  const endpointUrl = `${apiUrl}/Prediction`;
 
-  const values = validateForm();
-  if (!values) {
-    els.formNote.textContent = "Please fix the highlighted fields before continuing.";
-    return;
-  }
+  // Update UI to loading state
+  setPredictingState(true);
 
-  if (!API_BASE_URL || API_BASE_URL.includes("YOUR_RENDER_FASTAPI_URL")) {
-    showToast("Set API_BASE_URL in script.js before predicting.", "error");
-    els.formNote.textContent = "API_BASE_URL is not configured yet.";
-    return;
-  }
+  console.log(`[CustomerIQ] Dispatching prediction request to: ${endpointUrl}`);
+  console.log("[CustomerIQ] Payload (ModelData):", payload);
 
-  setLoadingState(true);
+  const startTime = performance.now();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 12000); // 12s timeout for ML inference
 
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
-
-    const response = await fetch(`${API_BASE_URL}${ENDPOINTS.predict}`, {
+    const response = await fetch(endpointUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(values),
-      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
     });
-    clearTimeout(timeout);
+
+    clearTimeout(timeoutId);
+    const latencyMs = Math.round(performance.now() - startTime);
 
     if (!response.ok) {
-      await handleHttpError(response);
-      return;
+      let errorDetail = `HTTP ${response.status} ${response.statusText}`;
+      try {
+        const errorJson = await response.json();
+        if (errorJson.detail) {
+          if (Array.isArray(errorJson.detail)) {
+            // Pydantic 422 validation detail array
+            errorDetail = errorJson.detail.map(d => `${d.loc ? d.loc.join('.') : 'field'}: ${d.msg}`).join(', ');
+          } else {
+            errorDetail = errorJson.detail;
+          }
+        }
+      } catch (e) {
+        // Raw text or non-json error
+      }
+      throw new Error(errorDetail);
     }
 
-    const data = await response.json();
-    if (
-      data == null ||
-      typeof data.cluster === "undefined" ||
-      typeof data.segment === "undefined" ||
-      typeof data.message === "undefined"
-    ) {
-      throw new Error("Unexpected response shape from API.");
+    const predictionData = await response.json();
+    console.log("[CustomerIQ] Received Prediction Response:", predictionData);
+
+    // Render result card with actual FastAPI response
+    renderPredictionResult(predictionData, payload, latencyMs);
+    showToast("Segment Identified", `Classified as ${predictionData.segment}`, "success");
+    
+    // Smooth scroll to result on mobile/tablets
+    if (window.innerWidth < 1024 && DOM.resultCard) {
+      DOM.resultCard.scrollIntoView({ behavior: "smooth", block: "start" });
     }
 
-    renderResult(data);
-  } catch (err) {
-    console.error("Prediction request failed:", err);
-    if (err.name === "AbortError") {
-      showResultError("The request timed out. Check that your API is awake and reachable, then try again.");
-    } else {
-      showResultError("Couldn't reach the prediction API. Check your connection or try again shortly.");
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error("[CustomerIQ] Prediction error:", error);
+
+    let friendlyMessage = error.message;
+    if (error.name === "AbortError") {
+      friendlyMessage = "Request timed out. If your Render backend is asleep, please allow 30-50s for cold boot and retry.";
+    } else if (error.message.includes("Failed to fetch") || error.message.includes("NetworkError")) {
+      friendlyMessage = `Cannot connect to FastAPI at ${apiUrl}. Please verify the Render URL or check CORS configuration in main.py.`;
     }
-    showToast("Prediction request failed.", "error");
+
+    showToast("Prediction Failed", friendlyMessage, "error");
+    
+    // Fallback: If in local preview mode and user wants to preview UI behavior when offline
+    showOfflineGuidance(friendlyMessage, apiUrl);
+
   } finally {
-    setLoadingState(false);
+    setPredictingState(false);
   }
 }
 
-async function handleHttpError(response) {
-  let detail = "";
-  try {
-    const body = await response.json();
-    detail = body?.detail ? (Array.isArray(body.detail) ? body.detail.map((d) => d.msg).join(" ") : body.detail) : "";
-  } catch (_) {
-    /* response wasn't JSON — ignore */
-  }
+function setPredictingState(isLoading) {
+  appState.isPredicting = isLoading;
+  if (!DOM.btnPredict) return;
 
-  let message;
-  switch (response.status) {
-    case 400:
-      message = "The API rejected the request. Please check the values you entered.";
-      break;
-    case 401:
-      message = "The API requires authentication that this frontend isn't sending yet.";
-      break;
-    case 422:
-      message = detail || "One or more fields don't match what the API expects.";
-      break;
-    case 500:
-      message = "The API had a problem generating a prediction. Please try again.";
-      break;
-    default:
-      message = `The API returned an unexpected error (${response.status}).`;
-  }
-
-  console.error("API error response:", response.status, detail);
-  showResultError(message);
-  showToast(message, "error");
-}
-
-function setLoadingState(isLoading) {
-  els.predictBtn.classList.toggle("is-loading", isLoading);
-  els.predictBtn.disabled = isLoading;
-  els.resetBtn.disabled = isLoading;
-
+  DOM.btnPredict.disabled = isLoading;
   if (isLoading) {
-    show(els.resultScanning);
-    hide(els.resultPlaceholder);
-    hide(els.resultCard);
-    hide(els.resultError);
+    DOM.btnPredict.classList.add("loading");
+    DOM.btnPredict.querySelector(".btn-text").textContent = "Analyzing Segments...";
   } else {
-    hide(els.resultScanning);
+    DOM.btnPredict.classList.remove("loading");
+    DOM.btnPredict.querySelector(".btn-text").textContent = "Predict Customer Segment";
   }
 }
 
-function renderResult(data) {
+// ==============================================================================
+// 8. RESULT RENDERING & SEGMENT INTERPRETATION
+// ==============================================================================
+function renderPredictionResult(data, inputPayload, latencyMs) {
   const cluster = data.cluster;
-  els.resultCluster.textContent = cluster;
-  els.resultSegment.textContent = data.segment;
-  els.resultMessage.textContent = data.message;
-  els.resultCard.dataset.cluster = String(cluster);
+  const segmentName = data.segment || `Cluster ${cluster}`;
+  const message = data.message || "Customer belongs to a discovered behavioral segment.";
 
-  hide(els.resultPlaceholder);
-  hide(els.resultError);
-  hide(els.resultScanning);
-  show(els.resultCard);
+  // Hide placeholder, reveal result card
+  if (DOM.placeholderCard) DOM.placeholderCard.style.display = "none";
+  if (DOM.resultCard) {
+    DOM.resultCard.classList.remove("cluster-0-theme", "cluster-1-theme");
+    // Apply cluster specific styling based on response
+    if (cluster === 1) {
+      DOM.resultCard.classList.add("cluster-1-theme");
+    } else {
+      DOM.resultCard.classList.add("cluster-0-theme");
+    }
+    DOM.resultCard.classList.add("active");
+  }
 
-  showToast("Segment predicted successfully.", "success");
+  // Update Cluster Badge
+  if (DOM.clusterBadge) {
+    DOM.clusterBadge.innerHTML = `
+      <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:currentColor;"></span>
+      Cluster ${cluster}
+    `;
+  }
+
+  // Update Segment Name
+  if (DOM.segmentHeading) {
+    DOM.segmentHeading.textContent = segmentName;
+  }
+
+  // Update Insight Text
+  if (DOM.insightText) {
+    DOM.insightText.textContent = message;
+  }
+
+  // Generate actionable recommendations based on cluster
+  if (DOM.recommendationBullets) {
+    if (cluster === 1) {
+      DOM.recommendationBullets.innerHTML = `
+        <li><strong>VIP Loyalty & Concierge:</strong> Enroll in tier-1 rewards program with bespoke benefits.</li>
+        <li><strong>Premium Cross-Selling:</strong> Introduce high-margin product bundles and early product access.</li>
+        <li><strong>Retention Defense:</strong> Assign dedicated account manager and priority customer support.</li>
+        <li><strong>Exclusive Invitations:</strong> Invite to private VIP webinars and product preview salons.</li>
+      `;
+    } else {
+      DOM.recommendationBullets.innerHTML = `
+        <li><strong>Conversion Incentives:</strong> Deploy targeted first-time or limited-time discount vouchers.</li>
+        <li><strong>Browse-to-Buy Triggers:</strong> Trigger automated exit-intent and abandoned browse email reminders.</li>
+        <li><strong>Affordable Starter Bundles:</strong> Showcase value-packed product packages to lower purchase barrier.</li>
+        <li><strong>Personalized Recommendations:</strong> Recommend top-selling products aligned with high web visit history.</li>
+      `;
+    }
+  }
+
+  // Update Snapshot Metrics
+  if (DOM.snapshotSpend) DOM.snapshotSpend.textContent = `$${inputPayload.total_spend.toLocaleString()}`;
+  if (DOM.snapshotIncome) DOM.snapshotIncome.textContent = `$${inputPayload.Income.toLocaleString()}`;
+  if (DOM.snapshotPurchases) DOM.snapshotPurchases.textContent = `${inputPayload.total_purchase} orders`;
+
+  // Update Timestamp
+  if (DOM.resultTimestamp) {
+    const now = new Date();
+    DOM.resultTimestamp.textContent = `Inferred in ${latencyMs}ms at ${now.toLocaleTimeString()}`;
+  }
+
+  // Setup Raw Payload Inspector
+  if (DOM.rawPayloadView) {
+    DOM.rawPayloadView.textContent = JSON.stringify({
+      request: {
+        endpoint: "/Prediction",
+        data: inputPayload
+      },
+      response: data,
+      latency: `${latencyMs}ms`
+    }, null, 2);
+  }
 }
 
-function showResultError(message) {
-  els.resultErrorMessage.textContent = message;
-  hide(els.resultPlaceholder);
-  hide(els.resultCard);
-  hide(els.resultScanning);
-  show(els.resultError);
+function showOfflineGuidance(errorMessage, apiUrl) {
+  // Give helpful diagnostic toast
+  showToast("API Unreachable", "Click 'API Status' in top bar to configure your live Render FastAPI URL.", "info");
 }
 
-function handleReset() {
-  els.form.reset();
-  FIELD_IDS.forEach(clearFieldError);
-  els.formNote.textContent = "";
-  hide(els.resultCard);
-  hide(els.resultError);
-  hide(els.resultScanning);
-  show(els.resultPlaceholder);
+// ==============================================================================
+// 9. FORM RESET & EVENT BINDINGS
+// ==============================================================================
+function initFormEventListeners() {
+  if (DOM.form) {
+    DOM.form.addEventListener("submit", handlePredictSubmit);
+  }
+
+  if (DOM.btnReset) {
+    DOM.btnReset.addEventListener("click", () => {
+      DOM.form.reset();
+      clearInputErrors();
+      
+      // Reset result card back to placeholder
+      if (DOM.resultCard) DOM.resultCard.classList.remove("active");
+      if (DOM.placeholderCard) DOM.placeholderCard.style.display = "flex";
+
+      // Reset presets styling
+      [DOM.presetHighValue, DOM.presetBrowsing, DOM.presetBalanced].forEach(btn => {
+        if (btn) btn.classList.remove("active");
+      });
+
+      showToast("Form Reset", "All input fields cleared.", "info");
+    });
+  }
+
+  // Toggle raw payload inspector
+  if (DOM.rawPayloadBtn && DOM.rawPayloadView) {
+    DOM.rawPayloadBtn.addEventListener("click", () => {
+      DOM.rawPayloadView.classList.toggle("active");
+      const isExpanded = DOM.rawPayloadView.classList.contains("active");
+      DOM.rawPayloadBtn.querySelector("span").textContent = isExpanded ? "Hide Raw JSON" : "View Raw JSON Payload";
+    });
+  }
+
+  // Remove error styling on live input typing
+  const formInputs = DOM.form.querySelectorAll(".form-input, .form-select");
+  formInputs.forEach(input => {
+    input.addEventListener("input", () => {
+      input.classList.remove("input-error");
+      const parent = input.closest(".input-field-wrapper");
+      if (parent) {
+        const errorSpan = parent.querySelector(".field-error-msg");
+        if (errorSpan) errorSpan.classList.remove("visible");
+      }
+    });
+  });
 }
 
-/* =========================================================
-   TOASTS
-   ========================================================= */
-function showToast(message, type = "info") {
+// ==============================================================================
+// 10. TOAST NOTIFICATION UTILITY
+// ==============================================================================
+function showToast(title, message, type = "info") {
+  if (!DOM.toastContainer) return;
+
   const toast = document.createElement("div");
-  toast.className = `toast${type === "error" ? " is-error" : type === "success" ? " is-success" : ""}`;
-  toast.textContent = message;
-  els.toastStack.appendChild(toast);
+  toast.className = `toast toast-${type}`;
 
+  const iconSvg = type === "success" 
+    ? `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>`
+    : type === "error"
+    ? `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`
+    : `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>`;
+
+  toast.innerHTML = `
+    <div class="toast-icon">${iconSvg}</div>
+    <div class="toast-content">
+      <h5>${title}</h5>
+      <p>${message}</p>
+    </div>
+  `;
+
+  DOM.toastContainer.appendChild(toast);
+
+  // Auto dismiss after 4 seconds
   setTimeout(() => {
-    toast.classList.add("is-leaving");
-    setTimeout(() => toast.remove(), 240);
+    toast.style.opacity = "0";
+    toast.style.transform = "translateX(40px)";
+    setTimeout(() => toast.remove(), 300);
   }, 4200);
 }
 
-/* =========================================================
-   HELPERS
-   ========================================================= */
-function show(el) { if (el) el.hidden = false; }
-function hide(el) { if (el) el.hidden = true; }
+// ==============================================================================
+// 11. HERO VISUAL CLUSTER SCATTER GENERATOR
+// ==============================================================================
+function renderHeroClusterNodes() {
+  const svg = document.getElementById("hero-cluster-svg");
+  if (!svg) return;
 
-function debounce(fn, wait) {
-  let t;
-  return (...args) => {
-    clearTimeout(t);
-    t = setTimeout(() => fn(...args), wait);
-  };
+  // Generate synthetic PCA cluster points for visual illustration
+  const cluster0Points = [
+    { x: 70, y: 190 }, { x: 95, y: 160 }, { x: 120, y: 210 },
+    { x: 80, y: 240 }, { x: 130, y: 175 }, { x: 105, y: 225 },
+    { x: 60, y: 170 }, { x: 145, y: 195 }, { x: 110, y: 150 },
+    { x: 160, y: 220 }, { x: 90, y: 260 }, { x: 135, y: 250 }
+  ];
+
+  const cluster1Points = [
+    { x: 280, y: 90 }, { x: 310, y: 120 }, { x: 260, y: 70 },
+    { x: 340, y: 95 }, { x: 295, y: 140 }, { x: 325, y: 60 },
+    { x: 370, y: 110 }, { x: 250, y: 115 }, { x: 355, y: 145 },
+    { x: 300, y: 65 }, { x: 275, y: 160 }, { x: 330, y: 165 }
+  ];
+
+  // Draw cluster centroids
+  const c0Centroid = `<circle cx="105" cy="205" r="14" fill="rgba(245, 158, 11, 0.2)" stroke="#f59e0b" stroke-width="2" stroke-dasharray="3,3" />
+                     <circle cx="105" cy="205" r="5" fill="#f59e0b" />`;
+  const c1Centroid = `<circle cx="310" cy="105" r="14" fill="rgba(16, 185, 129, 0.2)" stroke="#10b981" stroke-width="2" stroke-dasharray="3,3" />
+                     <circle cx="310" cy="105" r="5" fill="#10b981" />`;
+
+  let nodesHtml = `
+    <!-- Grid lines -->
+    <line x1="40" y1="280" x2="380" y2="280" stroke="rgba(255,255,255,0.1)" stroke-width="1" />
+    <line x1="40" y1="40" x2="40" y2="280" stroke="rgba(255,255,255,0.1)" stroke-width="1" />
+    <text x="210" y="296" fill="#64748b" font-size="10" text-anchor="middle">PCA Component 1 (Spending & Volume)</text>
+    <text x="18" y="160" fill="#64748b" font-size="10" transform="rotate(-90 18 160)" text-anchor="middle">PCA Component 2 (Tenure & Visits)</text>
+    ${c0Centroid}
+    ${c1Centroid}
+  `;
+
+  // Draw nodes
+  cluster0Points.forEach((pt, i) => {
+    nodesHtml += `<circle class="sim-node" cx="${pt.x}" cy="${pt.y}" r="5" fill="#fbbf24" opacity="0.85">
+      <title>Cluster 0 Point #${i + 1} (Browsing Customer)</title>
+    </circle>`;
+  });
+
+  cluster1Points.forEach((pt, i) => {
+    nodesHtml += `<circle class="sim-node" cx="${pt.x}" cy="${pt.y}" r="5" fill="#34d399" opacity="0.85">
+      <title>Cluster 1 Point #${i + 1} (High-Value Customer)</title>
+    </circle>`;
+  });
+
+  svg.innerHTML = nodesHtml;
+}
+
+// ==============================================================================
+// 12. MOBILE NAVIGATION DRAWER
+// ==============================================================================
+function initMobileMenu() {
+  if (!DOM.mobileMenuBtn || !DOM.mobileNavDrawer) return;
+
+  DOM.mobileMenuBtn.addEventListener("click", () => {
+    const isVisible = DOM.mobileNavDrawer.style.display === "flex";
+    DOM.mobileNavDrawer.style.display = isVisible ? "none" : "flex";
+  });
+
+  const mobileLinks = DOM.mobileNavDrawer.querySelectorAll("a");
+  mobileLinks.forEach(link => {
+    link.addEventListener("click", () => {
+      DOM.mobileNavDrawer.style.display = "none";
+    });
+  });
 }
