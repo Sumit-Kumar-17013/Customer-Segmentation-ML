@@ -17,7 +17,7 @@
  * you can also click the API STATUS badge in the top bar to test/change
  * your URL in real-time without re-deploying!
  */
-const API_BASE_URL = "https://mental-heath-score-in-ml-1.onrender.com";
+const API_BASE_URL = "https://customer-segmentation-ml-68m5.onrender.com";
 
 // Local storage key for runtime URL override (useful during testing)
 const STORAGE_KEY_API_URL = "customeriq_api_base_url";
