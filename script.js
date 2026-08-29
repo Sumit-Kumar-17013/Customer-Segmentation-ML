@@ -4,7 +4,7 @@
    Replace this with your deployed FastAPI base URL (no
    trailing slash), e.g. "https://customer-segmentation-api.onrender.com"
    ========================================================= */
-const API_BASE_URL = "YOUR_RENDER_FASTAPI_URL";
+const API_BASE_URL = "https://customer-segmentation-ml-68m5.onrender.com";
 
 const ENDPOINTS = {
   predict: "/Prediction",
